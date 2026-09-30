@@ -1,0 +1,86 @@
+name: Sync itsPLK Releases
+
+on:
+  workflow_dispatch: # Manual trigger only
+  
+permissions:
+  contents: write
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+
+    env:
+      UPSTREAM_REPO: 'itsPLK/ps5-webkit-autoloader'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync Git Tags
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
+          git fetch upstream --tags
+          git push origin --tags || true
+
+      - name: Mirror Releases & Assets
+        run: |
+          set -e
+
+          echo "Target repo: $GITHUB_REPOSITORY"
+          echo "Upstream repo: $UPSTREAM_REPO"
+
+          # 1. Fetch tags that actually have full Releases in your fork
+          FORK_RELEASES=$(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName -q '.[].tagName' || true)
+
+          # 2. Fetch tags from upstream releases
+          UPSTREAM_TAGS=$(gh release list -R "$UPSTREAM_REPO" --limit 100 --json tagName -q '.[].tagName')
+
+          for tag in $UPSTREAM_TAGS; do
+            if echo "$FORK_RELEASES" | grep -qx "$tag"; then
+              echo "Release $tag already exists in $GITHUB_REPOSITORY. Skipping."
+              continue
+            fi
+
+            echo "=== Syncing Release: $tag ==="
+            TMP_DIR="release_assets_${tag}"
+            mkdir -p "$TMP_DIR"
+
+            # Download assets from upstream
+            echo "Downloading assets from $UPSTREAM_REPO for tag $tag..."
+            gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable assets found."
+
+            # Fetch metadata
+            TITLE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q '.name')
+            IS_PRERELEASE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q '.isPrerelease')
+            gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q '.body' > "$TMP_DIR/notes.md"
+
+            FLAGS=()
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              FLAGS+=(--prerelease)
+            fi
+
+            # Collect files to upload (excluding notes.md)
+            ASSETS=()
+            for file in "$TMP_DIR"/*; do
+              if [ -f "$file" ] && [ "$(basename "$file")" != "notes.md" ]; then
+                ASSETS+=("$file")
+              fi
+            done
+
+            echo "Publishing release $tag to $GITHUB_REPOSITORY with ${#ASSETS[@]} asset(s)..."
+            
+            # Create release targeting your repository explicitly
+            gh release create "$tag" \
+              -R "$GITHUB_REPOSITORY" \
+              --title "${TITLE:-$tag}" \
+              --notes-file "$TMP_DIR/notes.md" \
+              "${FLAGS[@]}" \
+              "${ASSETS[@]}"
+
+            rm -rf "$TMP_DIR"
+            echo "Successfully mirrored $tag"
+          done
