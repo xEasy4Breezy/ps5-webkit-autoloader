@@ -1,4 +1,4 @@
-name: Sync itsPLK Releases
+name: Update itsPLK Releases
 
 on:
   workflow_dispatch: # Manual trigger only
