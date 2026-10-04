@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  workflows: write   # Required to push commits/tags containing .github/workflows changes
 
 jobs:
   sync-releases:
@@ -20,11 +21,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync Git Tags
+      - name: Sync Git Tags and Commits
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
+          # Fetch all branches and tags from upstream so tag commit SHAs exist locally
           git fetch upstream --tags --force
-          git push origin --tags --force || echo "Tag sync completed with warnings."
+          git push origin --tags --force || echo "Tags pushed with warnings, continuing..."
 
       - name: Mirror Releases & Assets
         run: |
@@ -33,14 +35,14 @@ jobs:
           echo "Target repo: $GITHUB_REPOSITORY"
           echo "Upstream repo: $UPSTREAM_REPO"
 
-          # 1. Fetch all release tags from the upstream repository
+          # 1. Fetch tags from upstream releases
           UPSTREAM_TAGS=$(gh release list -R "$UPSTREAM_REPO" --limit 500 --json tagName -q '.[].tagName')
 
-          # 2. Iterate and copy ONLY the releases that are not yet in your fork
+          # 2. Iterate and copy ONLY releases missing from your fork
           for tag in $UPSTREAM_TAGS; do
-            # Skip if the release already exists in your fork
+            # Skip if the release is already published in your fork
             if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "[-] Skipping: Release '$tag' is already present in $GITHUB_REPOSITORY."
+              echo "[-] Skipping: Release '$tag' already exists in $GITHUB_REPOSITORY."
               continue
             fi
 
@@ -48,8 +50,8 @@ jobs:
             TMP_DIR="release_assets_${tag}"
             mkdir -p "$TMP_DIR"
 
-            # Download assets (swallow failure in case the release has no custom binaries)
-            gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable assets found."
+            # Download release binaries (ignore failures if only source archives exist)
+            gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable binary assets found."
 
             # Fetch release metadata from upstream
             TITLE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q '.name')
@@ -61,7 +63,13 @@ jobs:
               FLAGS+=(--prerelease)
             fi
 
-            # Collect binaries only (skip notes.md and avoid broken wildcards)
+            # Resolve the exact commit SHA for the tag to satisfy target_commitish
+            TARGET_COMMIT=$(git rev-list -n 1 "$tag" 2>/dev/null || echo "")
+            if [ -n "$TARGET_COMMIT" ]; then
+              FLAGS+=(--target "$TARGET_COMMIT")
+            fi
+
+            # Collect downloaded assets (excluding notes.md and handling empty folders cleanly)
             shopt -s nullglob
             ASSETS=()
             for file in "$TMP_DIR"/*; do
@@ -71,10 +79,9 @@ jobs:
             done
             shopt -u nullglob
 
-            # Publish the missing release targeting the synced tag
+            # Publish the release
             gh release create "$tag" \
               -R "$GITHUB_REPOSITORY" \
-              --target "$tag" \
               --title "${TITLE:-$tag}" \
               --notes-file "$TMP_DIR/notes.md" \
               "${FLAGS[@]}" \
