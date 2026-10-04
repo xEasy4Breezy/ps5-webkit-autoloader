@@ -1,0 +1,84 @@
+name: Sync itsPLK Releases
+
+on:
+  workflow_dispatch: # Manual trigger only
+
+permissions:
+  contents: write
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+
+    env:
+      UPSTREAM_REPO: 'itsPLK/ps5-webkit-autoloader'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync Git Tags
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
+          git fetch upstream --tags
+          git push origin --tags || true
+
+      - name: Mirror Releases & Assets
+        run: |
+          set -euo pipefail
+
+          echo "Target repo: $GITHUB_REPOSITORY"
+          echo "Upstream repo: $UPSTREAM_REPO"
+
+          # 1. Fetch all release tags from the upstream repository
+          UPSTREAM_TAGS=$(gh release list -R "$UPSTREAM_REPO" --limit 500 --json tagName -q '.[].tagName')
+
+          # 2. Iterate and copy ONLY the releases that are not yet in your fork
+          for tag in $UPSTREAM_TAGS; do
+            # Direct check against the target repository: exits 0 if present, non-zero if missing
+            if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "[-] Skipping: Release '$tag' is already present in $GITHUB_REPOSITORY."
+              continue
+            fi
+
+            echo "[+] Syncing missing release: $tag"
+            TMP_DIR="release_assets_${tag}"
+            mkdir -p "$TMP_DIR"
+
+            # Download assets (swallow failure in case the release has only source zips and no custom binaries)
+            gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable assets found."
+
+            # Fetch release metadata from upstream
+            TITLE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q '.name')
+            IS_PRERELEASE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q '.isPrerelease')
+            gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q '.body' > "$TMP_DIR/notes.md"
+
+            FLAGS=()
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              FLAGS+=(--prerelease)
+            fi
+
+            # Collect binaries only (omit notes.md and avoid broken wildcards)
+            shopt -s nullglob
+            ASSETS=()
+            for file in "$TMP_DIR"/*; do
+              if [ -f "$file" ] && [ "$(basename "$file")" != "notes.md" ]; then
+                ASSETS+=("$file")
+              fi
+            done
+            shopt -u nullglob
+
+            # Publish the missing release to your fork
+            gh release create "$tag" \
+              -R "$GITHUB_REPOSITORY" \
+              --title "${TITLE:-$tag}" \
+              --notes-file "$TMP_DIR/notes.md" \
+              "${FLAGS[@]}" \
+              "${ASSETS[@]}"
+
+            rm -rf "$TMP_DIR"
+            echo "Successfully mirrored $tag"
+          done
