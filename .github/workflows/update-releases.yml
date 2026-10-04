@@ -23,8 +23,8 @@ jobs:
       - name: Sync Git Tags
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
-          git fetch upstream --tags
-          git push origin --tags || true
+          git fetch upstream --tags --force
+          git push origin --tags --force || echo "Tag sync completed with warnings."
 
       - name: Mirror Releases & Assets
         run: |
@@ -38,7 +38,7 @@ jobs:
 
           # 2. Iterate and copy ONLY the releases that are not yet in your fork
           for tag in $UPSTREAM_TAGS; do
-            # Direct check against the target repository: exits 0 if present, non-zero if missing
+            # Skip if the release already exists in your fork
             if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               echo "[-] Skipping: Release '$tag' is already present in $GITHUB_REPOSITORY."
               continue
@@ -48,7 +48,7 @@ jobs:
             TMP_DIR="release_assets_${tag}"
             mkdir -p "$TMP_DIR"
 
-            # Download assets (swallow failure in case the release has only source zips and no custom binaries)
+            # Download assets (swallow failure in case the release has no custom binaries)
             gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable assets found."
 
             # Fetch release metadata from upstream
@@ -61,7 +61,7 @@ jobs:
               FLAGS+=(--prerelease)
             fi
 
-            # Collect binaries only (omit notes.md and avoid broken wildcards)
+            # Collect binaries only (skip notes.md and avoid broken wildcards)
             shopt -s nullglob
             ASSETS=()
             for file in "$TMP_DIR"/*; do
@@ -71,9 +71,10 @@ jobs:
             done
             shopt -u nullglob
 
-            # Publish the missing release to your fork
+            # Publish the missing release targeting the synced tag
             gh release create "$tag" \
               -R "$GITHUB_REPOSITORY" \
+              --target "$tag" \
               --title "${TITLE:-$tag}" \
               --notes-file "$TMP_DIR/notes.md" \
               "${FLAGS[@]}" \
